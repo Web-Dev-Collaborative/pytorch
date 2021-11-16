@@ -228,8 +228,7 @@ class TORCH_API TensorExprKernel {
   // Specifically, we pre-allocate memory for intermediate buffers with static
   // size and manage these buffers in the way we manage JIT constant tensors:
   // push the buf args into the stack so NNC IR can access them at runtime.
-  std::vector<BufPtr> preAllocIntermediateBufs(
-      const std::vector<BufPtr>& interm_bufs);
+  void preAllocIntermediateBufs(std::vector<BufPtr>& interm_bufs);
 
  private:
   struct UnpackedTensorOptions {
