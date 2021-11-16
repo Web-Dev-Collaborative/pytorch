@@ -248,6 +248,124 @@ class ModifiesVarChecker : public IRVisitor {
   bool found_{false};
 };
 
+enum AccMode { READ, WRITE, BOTH };
+
+// This indicates the path from root to a stmt A in AST. Specifically, it
+// consists of a vector of integers: each integer represents the number of stmts
+// before A's ancestor or A in the block. For example, "1:1:0" points to stmt
+// "d[i] += e[i, j];" in the following code.
+//
+// c = a/b;
+// for i
+//  d[i] = 0;
+//  for j
+//    d[i] += e[i, j];
+using StmtIndex = std::vector<int32_t>;
+// Traverses the IR to identify all reads/writes to a buf, and their positions
+// in the AST which is represented as a StmtIndex
+using BufAccessNode = std::tuple<StmtPtr, AccMode, StmtIndex>;
+class BufAccesses : public IRVisitor {
+ public:
+  BufAccesses(BufPtr b) : buf_(b) {}
+
+  std::vector<std::tuple<StmtPtr, AccMode, StmtIndex>> accesses() {
+    return accesses_;
+  }
+
+  static std::vector<BufAccessNode> find(StmtPtr s, BufPtr b) {
+    BufAccesses finder(b);
+    s->accept(&finder);
+    return finder.accesses();
+  }
+
+ private:
+  StmtIndex getStmtIndex() {
+    return stmt_index_;
+  }
+  bool findBufReads(StmtPtr s) {
+    auto loads1 = NodeFinder<Load>::find(s);
+    for (auto l : loads1) {
+      if (l->buf() == buf_) {
+        return true;
+      }
+    }
+    auto loads2 = NodeFinder<ExternalCall>::find(s);
+    for (auto l : loads2) {
+      for (auto lb : l->buf_args()) {
+        if (lb == buf_) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  bool findBufWrites(StmtPtr s) {
+    auto writes1 = NodeFinder<Store>::find(s);
+    for (auto w : writes1) {
+      if (w->buf() == buf_) {
+        return true;
+      }
+    }
+    auto writes2 = NodeFinder<ExternalCall>::find(s);
+    for (auto w : writes2) {
+      if (w->buf() == buf_) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  void insertAccesses(StmtPtr s) {
+    bool has_reads = findBufReads(s), has_writes = findBufWrites(s);
+    if (has_reads && has_writes) {
+      auto acc = std::make_tuple(s, AccMode::BOTH, getStmtIndex());
+      accesses_.push_back(acc);
+      return;
+    }
+    if (has_reads) {
+      auto acc = std::make_tuple(s, AccMode::READ, getStmtIndex());
+      accesses_.push_back(acc);
+      return;
+    }
+    if (has_writes) {
+      auto acc = std::make_tuple(s, AccMode::WRITE, getStmtIndex());
+      accesses_.push_back(acc);
+    }
+  }
+
+  void visit(StorePtr v) {
+    insertAccesses(v);
+  }
+
+  void visit(LetPtr v) {
+    insertAccesses(v);
+  }
+
+  void visit(AtomicAddPtr v) {
+    insertAccesses(v);
+  }
+
+  void visit(ExternalCallPtr v) {
+    insertAccesses(v);
+  }
+
+  void visit(BlockPtr v) {
+    // Stmt counter of the block
+    int count = 0;
+    for (StmtPtr s : *v) {
+      stmt_index_.push_back(count);
+      s->accept(this);
+      stmt_index_.pop_back();
+      count++;
+    }
+  }
+
+  BufPtr buf_;
+  std::vector<BufAccessNode> accesses_;
+  StmtIndex stmt_index_;
+};
+
 // A class that analyzes the given program relevant for Block backend
 // It creates a map of multi dim buffers and their flat verions
 class CreateBufferMap : public IRVisitor {
